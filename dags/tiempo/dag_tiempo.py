@@ -5,20 +5,25 @@ from airflow.operators.bash_operator import BashOperator
 import os
 import csv
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any
 from airflow.exceptions import AirflowSkipException
+from airflow.providers.redis.hooks.redis import RedisHook
+import json
 
 from tiempo.config import KEY
+
+from tiempo.database.conexion import crearConexion
+
 
 # Funcion para comprobar la existencia de la carpeta data
 def existe_carpeta()->str:
 
 	ruta_comprobacion=os.path.join(os.getcwd(), "dags/tiempo/data")
 
-	return "leer_csv" if os.path.exists(ruta_comprobacion) else "crear_carpeta"
+	return "extraccion_data" if os.path.exists(ruta_comprobacion) else "crear_carpeta"
 
 # Funcion para leer el archivo CSV
-def leerCSV(**kwarg)->None:
+def leerCSV()->List[str]:
 
 	ruta_archivo_csv=os.path.join(os.getcwd(), "dags/tiempo/data/ciudades.csv")
 
@@ -26,7 +31,9 @@ def leerCSV(**kwarg)->None:
 
 		data=[tuple(linea) for linea in csv.reader(archivo, delimiter=",")]
 
-	kwarg["ti"].xcom_push(key="ciudades", value=[registro[1].strip() for registro in data])
+	ciudades=[registro[1].strip() for registro in data]
+
+	return ciudades
 
 # Funcion para realizar una peticion a la API
 def peticion_API(ciudad:str)->Optional[Dict]:
@@ -39,27 +46,44 @@ def peticion_API(ciudad:str)->Optional[Dict]:
 
 		return respuesta.json()
 
-	else:
-		
-		print(respuesta.status_code)
-
-		raise AirflowSkipException(f"Error en la extraccion de la ciudad {ciudad}")
+	print(f"Error en la obtencion de los datos en la API de la ciudad {ciudad}")
 
 # Funcion para extraer los datos de la API
-def extraerData(**kwarg)->None:
+def extraccion(redis:Any=crearConexion())->None:
 
-	ciudades=kwarg["ti"].xcom_pull(key="ciudades", task_ids="leer_csv")
+	ciudades=leerCSV()
+
+	for ciudad in ciudades:
+		
+		data=peticion_API(ciudad)
+
+		if data is not None:
+
+			redis.set(ciudad, json.dumps(data))
+
+	print("Extraccion finalizada")
+
+# Funcion para transformar los datos de la API
+def transformacion(redis:Any=crearConexion())->None:
+
+	ciudades=leerCSV()
 
 	for ciudad in ciudades:
 
-		data=peticion_API(ciudad)
+		valor=redis.get(ciudad)
 
-		print(data)
+		if valor is not None:
+
+			datos=json.loads(valor.decode())
+
+			print(datos)
 
 
-
-with DAG("dag_tiempo", start_date=datetime(2023,12,20), description="DAG para obtener datos de la API de OpenWeather",
-		schedule_interval=timedelta(days=1), catchup=False) as dag:
+with DAG("dag_tiempo",
+		start_date=datetime(2023,12,21),
+		description="DAG para obtener datos de la API de OpenWeather",
+		schedule_interval=timedelta(days=1),
+		catchup=False) as dag:
 
 	comprobar_carpeta=BranchPythonOperator(task_id="comprobar_carpeta", python_callable=existe_carpeta)
 
@@ -67,12 +91,11 @@ with DAG("dag_tiempo", start_date=datetime(2023,12,20), description="DAG para ob
 
 	mover_csv=BashOperator(task_id="mover_csv", bash_command="cd ../../opt/airflow/dags/tiempo && mv 'ciudades.csv' '/opt/airflow/dags/tiempo/data/ciudades.csv'")
 
-	leer_csv=PythonOperator(task_id="leer_csv", python_callable=leerCSV, trigger_rule="none_failed_min_one_success")
+	extraccion_data=PythonOperator(task_id="extraccion_data", python_callable=extraccion, trigger_rule="none_failed_min_one_success")
 
-	extraccion_data=PythonOperator(task_id="extraccion_data", python_callable=extraerData)
+	transformacion_data=PythonOperator(task_id="transformacion_data", python_callable=transformacion)
 
 
-comprobar_carpeta >> [crear_carpeta, leer_csv]
+comprobar_carpeta >> [crear_carpeta, extraccion_data]
 
-crear_carpeta >> mover_csv >> leer_csv >> extraccion_data
-	
+crear_carpeta >> mover_csv >> extraccion_data >> transformacion_data
