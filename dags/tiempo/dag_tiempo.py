@@ -63,6 +63,33 @@ def extraccion(redis:Any=crearConexion())->None:
 
 	print("Extraccion finalizada")
 
+# Funcion para limpiar los datos
+def limpiarDatos(datos:Dict)->Dict:
+
+	tiempo=[valor["main"] for valor in datos["weather"]]
+
+	tiempo_unido=", ".join(tiempo)
+
+	principal=datos["main"]
+				
+	# Funcion para convertir la temperatura de K a ºC
+	def conversion_temperatura(temperatura:float)->float:
+
+		return round(temperatura-273.15, 2)
+
+	# Funcion para convertir la presion de hPa a atm
+	def conversion_presion(presion:float)->float:
+
+		return round(presion/1013, 2)
+
+	return {"tiempo":tiempo_unido.lower(),
+			"temperatura_media_celsius":conversion_temperatura(principal["temp"]),
+			"temperatura_maxima_celsius":conversion_temperatura(principal["temp_max"]),
+			"temperatura_minima_celsius":conversion_temperatura(principal["temp_min"]),
+			"presion_atm":conversion_presion(principal["pressure"]),
+			"humedad_porcentaje":principal["humidity"],
+			"viento_m_s":datos["wind"]["speed"]}
+
 # Funcion para transformar los datos de la API
 def transformacion(redis:Any=crearConexion())->None:
 
@@ -70,17 +97,37 @@ def transformacion(redis:Any=crearConexion())->None:
 
 	for ciudad in ciudades:
 
-		valor=redis.get(ciudad)
+		valores=redis.get(ciudad)
 
-		if valor is not None:
+		if valores is not None:
 
-			datos=json.loads(valor.decode())
+			datos=json.loads(valores.decode())
 
-			print(datos)
+			datos_limpios=limpiarDatos(datos)
 
+			redis.set(ciudad, json.dumps(datos_limpios))
+
+	print("Transformacion finalizada")
+
+# Funcion para cargar los datos de la API
+def carga(redis:Any=crearConexion())->None:
+
+	ciudades=leerCSV()
+
+	for ciudad in ciudades:
+
+		datos=redis.get(ciudad)
+
+		if datos is not None:
+
+			data=json.loads(datos.decode())
+
+			print(data)
+			
+			
 
 with DAG("dag_tiempo",
-		start_date=datetime(2023,12,21),
+		start_date=datetime(2023,12,22),
 		description="DAG para obtener datos de la API de OpenWeather",
 		schedule_interval=timedelta(days=1),
 		catchup=False) as dag:
@@ -93,9 +140,11 @@ with DAG("dag_tiempo",
 
 	extraccion_data=PythonOperator(task_id="extraccion_data", python_callable=extraccion, trigger_rule="none_failed_min_one_success")
 
-	transformacion_data=PythonOperator(task_id="transformacion_data", python_callable=transformacion)
+	transformacion_data=PythonOperator(task_id="transformacion_data", python_callable=transformacion, trigger_rule="none_failed_min_one_success")
+
+	carga_data=PythonOperator(task_id="carga_data", python_callable=carga)
 
 
 comprobar_carpeta >> [crear_carpeta, extraccion_data]
 
-crear_carpeta >> mover_csv >> extraccion_data >> transformacion_data
+crear_carpeta >> mover_csv >> extraccion_data >> transformacion_data >> carga_data
