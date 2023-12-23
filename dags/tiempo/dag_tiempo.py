@@ -9,11 +9,29 @@ from typing import Optional, Dict, List, Any
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.redis.hooks.redis import RedisHook
 import json
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from tiempo.config import KEY
 
-from tiempo.database.conexion import crearConexion
+from tiempo.database.redis.conexion import crearConexion
 
+from tiempo.database.postgres.conexion import crearHook
+
+# Funcion para crear la tabla de los datos del tiempo de las ciudades
+def crearTabla(hook:PostgresHook=crearHook())->None:
+
+	hook.run("""CREATE TABLE tiempo (id SERIAL PRIMARY KEY,
+									ciudad VARCHAR(100),
+									fecha TIMESTAMP,
+									tiempo VARCHAR(20),
+									temp_media FLOAT,
+									temp_max FLOAT,
+									temp_min FLOAT,
+									presion FLOAT,
+									humedad FLOAT,
+									viento FLOAT);""")
+	
+	print("Tabla creada correctamente")
 
 # Funcion para comprobar la existencia de la carpeta data
 def existe_carpeta()->str:
@@ -83,12 +101,12 @@ def limpiarDatos(datos:Dict)->Dict:
 		return round(presion/1013, 2)
 
 	return {"tiempo":tiempo_unido.lower(),
-			"temperatura_media_celsius":conversion_temperatura(principal["temp"]),
-			"temperatura_maxima_celsius":conversion_temperatura(principal["temp_max"]),
-			"temperatura_minima_celsius":conversion_temperatura(principal["temp_min"]),
-			"presion_atm":conversion_presion(principal["pressure"]),
-			"humedad_porcentaje":principal["humidity"],
-			"viento_m_s":datos["wind"]["speed"]}
+			"temp_media":conversion_temperatura(principal["temp"]),
+			"temp_max":conversion_temperatura(principal["temp_max"]),
+			"temp_min":conversion_temperatura(principal["temp_min"]),
+			"presion":conversion_presion(principal["pressure"]),
+			"humedad":principal["humidity"],
+			"viento":datos["wind"]["speed"]}
 
 # Funcion para transformar los datos de la API
 def transformacion(redis:Any=crearConexion())->None:
@@ -110,7 +128,7 @@ def transformacion(redis:Any=crearConexion())->None:
 	print("Transformacion finalizada")
 
 # Funcion para cargar los datos de la API
-def carga(redis:Any=crearConexion())->None:
+def carga(redis:Any=crearConexion(), hook:PostgresHook=crearHook())->None:
 
 	ciudades=leerCSV()
 
@@ -122,14 +140,23 @@ def carga(redis:Any=crearConexion())->None:
 
 			data=json.loads(datos.decode())
 
-			print(data)
-			
+			hook.run("""INSERT INTO tiempo (ciudad, fecha, tiempo, temp_media, temp_max, temp_min, presion, humedad, viento)
+						VALUES %s""",
+						parameters=((ciudad,
+									datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+									data["tiempo"],
+									data["temp_media"],
+									data["temp_max"],
+									data["temp_min"],
+									data["presion"],
+									data["humedad"],
+									data["viento"]),),)
 			
 
 with DAG("dag_tiempo",
-		start_date=datetime(2023,12,22),
+		start_date=datetime(2023,12,23),
 		description="DAG para obtener datos de la API de OpenWeather",
-		schedule_interval=timedelta(days=1),
+		schedule_interval=timedelta(minutes=60),
 		catchup=False) as dag:
 
 	comprobar_carpeta=BranchPythonOperator(task_id="comprobar_carpeta", python_callable=existe_carpeta)
@@ -137,6 +164,8 @@ with DAG("dag_tiempo",
 	crear_carpeta=BashOperator(task_id="crear_carpeta", bash_command="cd ../../opt/airflow/dags/tiempo && mkdir data")
 
 	mover_csv=BashOperator(task_id="mover_csv", bash_command="cd ../../opt/airflow/dags/tiempo && mv 'ciudades.csv' '/opt/airflow/dags/tiempo/data/ciudades.csv'")
+
+	creacion_tabla=PythonOperator(task_id="creacion_tabla", python_callable=crearTabla)
 
 	extraccion_data=PythonOperator(task_id="extraccion_data", python_callable=extraccion, trigger_rule="none_failed_min_one_success")
 
@@ -147,4 +176,4 @@ with DAG("dag_tiempo",
 
 comprobar_carpeta >> [crear_carpeta, extraccion_data]
 
-crear_carpeta >> mover_csv >> extraccion_data >> transformacion_data >> carga_data
+crear_carpeta >> mover_csv >> creacion_tabla >> extraccion_data >> transformacion_data >> carga_data
