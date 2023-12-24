@@ -11,11 +11,28 @@ from airflow.providers.redis.hooks.redis import RedisHook
 import json
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
-from tiempo.config import KEY
+from tiempo.config import KEY, LOGS
 
 from tiempo.database.redis.conexion import crearConexion
 
 from tiempo.database.postgres.conexion import crearHook
+
+# Funcion para crear el archivo txt y almacenarlo en la carpeta
+def crearLogs(ciudades:List)->None:
+
+	ruta_carpeta_logs=os.path.join(os.getcwd(), LOGS)
+
+	archivo_log=f"log_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+
+	ruta_archivo_log=os.path.join(ruta_carpeta_logs, archivo_log)
+
+	with open(ruta_archivo_log, "w") as archivo:
+
+		archivo.write(f"Fecha de ejecucion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+		
+		for ciudad in ciudades:
+
+			archivo.write(f"Ciudad extraida correctamente: {ciudad}\n")
 
 # Funcion para crear la tabla de los datos del tiempo de las ciudades
 def crearTabla(hook:PostgresHook=crearHook())->None:
@@ -38,7 +55,7 @@ def existe_carpeta()->str:
 
 	ruta_comprobacion=os.path.join(os.getcwd(), "dags/tiempo/data")
 
-	return "extraccion_data" if os.path.exists(ruta_comprobacion) else "crear_carpeta"
+	return "extraccion_data" if os.path.exists(ruta_comprobacion) else "crear_carpeta_data"
 
 # Funcion para leer el archivo CSV
 def leerCSV()->List[str]:
@@ -132,6 +149,8 @@ def carga(redis:Any=crearConexion(), hook:PostgresHook=crearHook())->None:
 
 	ciudades=leerCSV()
 
+	ciudades_extraidas=[]
+
 	for ciudad in ciudades:
 
 		datos=redis.get(ciudad)
@@ -151,17 +170,25 @@ def carga(redis:Any=crearConexion(), hook:PostgresHook=crearHook())->None:
 									data["presion"],
 									data["humedad"],
 									data["viento"]),),)
+
+			ciudades_extraidas.append(ciudad)
+	
+	crearLogs(ciudades_extraidas)
+	
+	print("Carga finalizada")
 			
 
 with DAG("dag_tiempo",
-		start_date=datetime(2023,12,23),
+		start_date=datetime(2023,12,24),
 		description="DAG para obtener datos de la API de OpenWeather",
 		schedule_interval=timedelta(minutes=60),
 		catchup=False) as dag:
 
 	comprobar_carpeta=BranchPythonOperator(task_id="comprobar_carpeta", python_callable=existe_carpeta)
 
-	crear_carpeta=BashOperator(task_id="crear_carpeta", bash_command="cd ../../opt/airflow/dags/tiempo && mkdir data")
+	crear_carpeta_data=BashOperator(task_id="crear_carpeta_data", bash_command="cd ../../opt/airflow/dags/tiempo && mkdir data")
+
+	crear_carpeta_logs=BashOperator(task_id="crear_carpeta_logs", bash_command="cd ../../opt/airflow/dags/tiempo && mkdir logs")
 
 	mover_csv=BashOperator(task_id="mover_csv", bash_command="cd ../../opt/airflow/dags/tiempo && mv 'ciudades.csv' '/opt/airflow/dags/tiempo/data/ciudades.csv'")
 
@@ -174,6 +201,6 @@ with DAG("dag_tiempo",
 	carga_data=PythonOperator(task_id="carga_data", python_callable=carga)
 
 
-comprobar_carpeta >> [crear_carpeta, extraccion_data]
+comprobar_carpeta >> [crear_carpeta_data, extraccion_data]
 
-crear_carpeta >> mover_csv >> creacion_tabla >> extraccion_data >> transformacion_data >> carga_data
+crear_carpeta_data >> mover_csv >> crear_carpeta_logs >> creacion_tabla >> extraccion_data >> transformacion_data >> carga_data
